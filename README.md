@@ -67,6 +67,8 @@ ERROR:__main__:Inconsistency for grapheme [C]: potential mappings ['c', 'ts'].
 - Generate a debugging segmentation which highlights which entry was
   matched for each substring, e.g.:
 
-| Tirua-112_live-1 | mO.ˈNEj | {^}/{} {m}/{m} {O}/{ö} {.}/{NULL} {ˈ}/{NULL} {N}/{ŋ} {E}/{ë} {j}/{j} {$}/{} |
-| Nuevatolten-205_only-1 | ˈTI.SU | {^}/{} {ˈ}/{NULL} {TI}/{cɪ} {.}/{NULL} {S}/{ʃ} {U}/{ʊ} {$}/{} |
-| Mariquina-58_moon-1 | kE.ˈjING | {^}/{} {k}/{k} {E}/{ë} {.}/{NULL} {ˈ}/{NULL} {j}/{j} {ING}/{ɪŋ} {$}/{} |
+  | ID | Form | Debug segments |
+  |----|------|----------------|
+  | Tirua-112_live-1 | mO.ˈNEj | {^}/{} {m}/{m} {O}/{ö} {.}/{NULL} {ˈ}/{NULL} {N}/{ŋ} {E}/{ë} {j}/{j} {$}/{} |
+  | Nuevatolten-205_only-1 | ˈTI.SU | {^}/{} {ˈ}/{NULL} {TI}/{cɪ} {.}/{NULL} {S}/{ʃ} {U}/{ʊ} {$}/{} |
+  | Mariquina-58_moon-1 | kE.ˈjING | {^}/{} {k}/{k} {E}/{ë} {.}/{NULL} {ˈ}/{NULL} {j}/{j} {ING}/{ɪŋ} {$}/{} |
