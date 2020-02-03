@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
 
 # TODO: remove zero frequency
+# TODO: remove redundant complex rules (ab = a + b)
+# TODO: properly emulate spaces?
 
 # Import Python default libraries
+from collections import defaultdict
 import argparse
 import csv
-from collections import defaultdict
 import itertools
 import logging
-from pathlib import Path
+import pathlib
+import random
 import re
 import unicodedata
 
 # Import other libraries
 import pyclts
 from pyclts import CLTS
-
-# TODO: Deal with multiple IPA columns/languages
-
 
 def normalize(text):
     """
@@ -93,7 +93,7 @@ def check_consistency(profile, clts, args):
                 segment.split("/")[1] if "/" in segment else segment
                 for segment in segments
             ]
-            segments = [segment for segment in segments if segment != "NULL"]
+            segments = [segment for segment in segments if segment != "NULL" and segment]
 
             # check for unknown sounds
             unknown = [
@@ -146,12 +146,15 @@ def sort_profile(profile, args):
     Return a sorted copy of a profile (suitable for diffs).
     """
 
-    # NULLs are always placed at the top, followed by full forms
+    # NULLs are always placed at the top (with special symbols "^" and "$"
+    # first), followed by full forms
     # The general sort is first by length, then alphabetically
 
     sorted_prf = sorted(
         profile,
         key=lambda e: (
+            e[args.grapheme] not in ["^", "$"],
+            e[args.grapheme] != "^",
             e[args.ipa] != "NULL",
             re.match("\^.*\$", e[args.grapheme]) is None,
             len(e[args.grapheme]),
@@ -181,6 +184,7 @@ def apply_profile(profile, args):
     for entry in profile:
         new_entry = entry.copy()
         new_entry["FREQUENCY"] = 0
+        new_entry['EXAMPLES'] = []
         new_profile.append(new_entry)
 
     # Do the segmentation
@@ -192,6 +196,12 @@ def apply_profile(profile, args):
     else:
         delimiter = "\t"
 
+    # If a multilanguage checking was requested (for different profiles,
+    # such as in the case of WOLD), cache the language_id from the
+    # profile name; [:-4] if for the default `.tsv` suffix
+    if args.multilang:
+        lang_id = pathlib.PurePosixPath(args.profile).name[:-4]
+
     # Load the forms
     with open(args.wl) as wordlist:
         reader = csv.DictReader(wordlist, delimiter=delimiter)
@@ -202,6 +212,12 @@ def apply_profile(profile, args):
 
         # iterate over rows
         for row in reader:
+            # Skip if multiple language verification is requested and
+            # language id does not match
+            if args.multilang:
+                if row[args.lang_id] != lang_id:
+                    continue
+
             # Read and prepare form
             form = row[args.form]
             if not args.nonfc:
@@ -224,7 +240,10 @@ def apply_profile(profile, args):
                             )
                         else:
                             segments.append(segment_map[needle][args.ipa])
+
+                        # Update frequency and examples
                         segment_map[needle]["FREQUENCY"] += 1
+                        segment_map[needle]['EXAMPLES'].append(form)
                         i += length
                         match = True
                         break
@@ -262,9 +281,19 @@ def apply_profile(profile, args):
         with open(args.debug_wl, "w") as handler:
             handler.write(dwl_buffer)
 
-    # Make sure all frequency values are strings
+    # Make sure all frequency values are strings and get some random
+    # examples
     for entry in new_profile:
         entry["FREQUENCY"] = str(entry["FREQUENCY"])
+
+        # Get a set of the examples, sample it, remove boundaries if
+        # necessary, and join in a single sorted string
+        examples = set(entry['EXAMPLES'])
+        example_sample = random.sample(examples, min(len(examples), 3))
+        if not args.nobound:
+            example_sample = [form[1:-1] for form in example_sample]
+
+        entry['EXAMPLES'] = '"%s"' % (",".join(sorted(example_sample)))
 
     return new_profile
 
@@ -300,6 +329,15 @@ def output_profile(profile, args):
     # Fill buffer with entries; as the `csv` library might have returned empty fields
     # as `None`, we need to check for those
     for entry in profile:
+        if entry['FREQUENCY'] == "0" and not args.keepzero:
+            continue
+
+        # For special symbols "^" and "$", the EXAMPLES column will be
+        # empty (if it exists)
+        if "EXAMPLES" in entry:
+            if entry[args.grapheme] in ["^", "$"]:
+                entry['EXAMPLES'] = ""
+
         tmp = [entry.get(field, "") for field in output_fields]
         tmp = [value if value else "" for value in tmp]
 
@@ -320,7 +358,7 @@ def main(args):
 
     # Load CLTS
     # TODO: use default repos path
-    clts = CLTS(Path(args.clts).expanduser().as_posix())
+    clts = CLTS(pathlib.Path(args.clts).expanduser().as_posix())
 
     # Load the profile
     profile = read_profile(args.profile, args)
@@ -409,9 +447,25 @@ if __name__ == "__main__":
         default="Form",
     )
     parser.add_argument(
+        "--lang_id",
+        type=str,
+        help="Name of the language id column in the wordlist (default: `Language_ID`)",
+        default="Language_ID",
+    )
+    parser.add_argument(
+        "--multilang",
+        action="store_true",
+        help="Instruct to use multiple profiles, checking the language id.",
+    )
+    parser.add_argument(
         "--nonfc",
         action="store_true",
         help="Instruct not to perform Unicode NFC normalization in profile and forms.",
+    )
+    parser.add_argument(
+        "--keepzero",
+        action="store_true",
+        help="Instruct to keep entries with zero frequency in output.",
     )
     parser.add_argument(
         "--nobound",
