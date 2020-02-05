@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 
-# TODO: remove zero frequency
 # TODO: remove redundant complex rules (ab = a + b)
 # TODO: properly emulate spaces?
 
 # Import Python default libraries
 from collections import defaultdict
 import argparse
+import copy
 import csv
 import itertools
 import logging
@@ -18,6 +18,7 @@ import unicodedata
 # Import other libraries
 import pyclts
 from pyclts import CLTS
+
 
 def normalize(text):
     """
@@ -93,7 +94,9 @@ def check_consistency(profile, clts, args):
                 segment.split("/")[1] if "/" in segment else segment
                 for segment in segments
             ]
-            segments = [segment for segment in segments if segment != "NULL" and segment]
+            segments = [
+                segment for segment in segments if segment != "NULL" and segment
+            ]
 
             # check for unknown sounds
             unknown = [
@@ -102,10 +105,61 @@ def check_consistency(profile, clts, args):
             ]
             if any(unknown):
                 logger.error(
-                    "Mapping [%s] -> [%s] includes at least one unknown sound.",
+                    "Mapping [%s] (%s) -> [%s] (%s) includes at least one unknown sound.",
                     grapheme,
+                    unicode2codepointstr(grapheme),
                     value,
+                    unicode2codepointstr(value),
                 )
+
+
+def trim_profile(profile, clts, args):
+    # Make a copy of the profile (so we don't change in place) and clear
+    # all frequencies
+    new_profile = []
+    for entry in profile:
+        new_entry = entry.copy()
+        new_entry["FREQUENCY"] = 0
+        new_entry["EXAMPLES"] = []
+        new_profile.append(new_entry)
+
+    # build segment map
+    segment_map = {entry[args.grapheme]: entry for entry in new_profile}
+
+    # Collect all keys, so that we will gradually remove them
+    graphemes = sorted(list(segment_map.keys()))
+
+    # For each entry, we will remove it from `segment_map`, apply the resulting
+    # profile, and add the entry back at the end of loop (still expansive, but
+    # orders of magnitude less expansive than making a copy at each iteration)
+    removed = 0
+    for grapheme in graphemes:
+        # Remove the current entry from the segment map
+        entry = segment_map.pop(grapheme)
+        ipa = entry[args.ipa]
+
+        # Obtain the segments without the current rule
+        segments = " ".join(apply_profile_to_form(grapheme, segment_map, args))
+
+        # If the resulting `segments` match the `ipa` reference, don't add the
+        # rule back (but keep track of how many were removed)
+        if ipa == segments:
+            logging.info(
+                "Rule for grapheme [%s] (%s) is superfluous, removing it...",
+                grapheme,
+                unicode2codepointstr(grapheme),
+            )
+            removed += 1
+        else:
+            # Add the entry back to segment_map
+            segment_map[grapheme] = entry
+
+    # Drop from `new_profile` everything that is not in `segment_map` anymore
+    new_profile = [
+        entry for entry in new_profile if entry[args.grapheme] in segment_map
+    ]
+
+    return new_profile, removed
 
 
 def clean_profile(profile, clts, args):
@@ -165,6 +219,59 @@ def sort_profile(profile, args):
     return sorted_prf
 
 
+# TODO: this is changing `segment_map` in place, improve
+def apply_profile_to_form(form, segment_map, args):
+    # Read and prepare form
+    if not args.nonfc:
+        form = normalize(form)
+    if not args.nonfc:
+        form = "^%s$" % form
+
+    # apply profile to the form
+    i = 0
+    segments = []
+    while True:
+        match = False
+        for length in range(len(form[i:]), 0, -1):
+            needle = form[i : i + length]
+            if needle in segment_map:
+                if args.debug_wl:
+                    segments.append(
+                        "{%s}/{%s}" % (needle, segment_map[needle][args.ipa])
+                    )
+                else:
+                    segments.append(segment_map[needle][args.ipa])
+
+                # Update frequency and examples
+                segment_map[needle]["FREQUENCY"] += 1
+                segment_map[needle]["EXAMPLES"].append(form)
+                i += length
+                match = True
+                break
+
+        if not match:
+            if form[i] == " ":
+                if args.debug_wl:
+                    segments.append("{ }/{#}")
+                else:
+                    segments.append("#")
+            elif form[i] in ["^", "$"]:
+                if args.debug_wl:
+                    segments.append("{%s}/{}" % form[i])
+            else:
+                segments.append("<<%s>>" % form[i])
+            i += 1
+
+        if i == len(form):
+            break
+
+    # remove nulls; note that this will keep NULLs in debug output,
+    # showing what we are skipping over
+    segments = [seg for seg in segments if seg != "NULL"]
+
+    return segments
+
+
 # TODO: use the segments library? we need to collect frequencies...
 # TODO: add debug mode
 def apply_profile(profile, args):
@@ -184,11 +291,8 @@ def apply_profile(profile, args):
     for entry in profile:
         new_entry = entry.copy()
         new_entry["FREQUENCY"] = 0
-        new_entry['EXAMPLES'] = []
+        new_entry["EXAMPLES"] = []
         new_profile.append(new_entry)
-
-    # Do the segmentation
-    segment_map = {entry[args.grapheme]: entry for entry in new_profile}
 
     # Use the specified delimiter
     if args.csv:
@@ -202,7 +306,8 @@ def apply_profile(profile, args):
     if args.multilang:
         lang_id = pathlib.PurePosixPath(args.profile).name[:-4]
 
-    # Load the forms
+    # Build segment map, load the forms, and do the segmentation
+    segment_map = {entry[args.grapheme]: entry for entry in new_profile}
     with open(args.wl) as wordlist:
         reader = csv.DictReader(wordlist, delimiter=delimiter)
 
@@ -218,57 +323,9 @@ def apply_profile(profile, args):
                 if row[args.lang_id] != lang_id:
                     continue
 
-            # Read and prepare form
-            form = row[args.form]
-            if not args.nonfc:
-                form = normalize(form)
-            if not args.nonfc:
-                form = "^%s$" % form
+            # Run the segmentation
+            segments = apply_profile_to_form(row[args.form], segment_map, args)
 
-            # apply profile to the form
-            i = 0
-            segments = []
-            while True:
-                match = False
-                for length in range(len(form[i:]), 0, -1):
-                    needle = form[i : i + length]
-                    if needle in segment_map:
-                        if args.debug_wl:
-                            segments.append(
-                                "{%s}/{%s}"
-                                % (needle, segment_map[needle][args.ipa])
-                            )
-                        else:
-                            segments.append(segment_map[needle][args.ipa])
-
-                        # Update frequency and examples
-                        segment_map[needle]["FREQUENCY"] += 1
-                        segment_map[needle]['EXAMPLES'].append(form)
-                        i += length
-                        match = True
-                        break
-
-                if not match:
-                    if form[i] == " ":
-                        if args.debug_wl:
-                            segments.append("{ }/{#}")
-                        else:
-                            segments.append("#")
-                    elif form[i] in ["^", "$"]:
-                        if args.debug_wl:
-                            segments.append("{%s}/{}" % form[i])
-                    else:
-                        segments.append("<<%s>>" % form[i])
-                    i += 1
-
-                if i == len(form):
-                    break
-
-            # remove nulls; note that this will keep NULLs in debug output,
-            # showing what we are skipping over
-            segments = [seg for seg in segments if seg != "NULL"]
-
-            # print(form, segments)
             # Collect output, if requested
             if args.debug_wl:
                 row["Segments"] = " ".join(segments)
@@ -288,12 +345,18 @@ def apply_profile(profile, args):
 
         # Get a set of the examples, sample it, remove boundaries if
         # necessary, and join in a single sorted string
-        examples = set(entry['EXAMPLES'])
+        # Note that we seed with the Grapheme, so it is reproducible
+        examples = set(entry["EXAMPLES"])
+        random.seed(entry[args.grapheme])
         example_sample = random.sample(examples, min(len(examples), 3))
         if not args.nobound:
             example_sample = [form[1:-1] for form in example_sample]
 
-        entry['EXAMPLES'] = '"%s"' % (",".join(sorted(example_sample)))
+        example_sample = (
+            ",".join(sorted(example_sample)).replace("\n", " ").strip()
+        )
+
+        entry["EXAMPLES"] = '"%s"' % example_sample
 
     return new_profile
 
@@ -329,14 +392,14 @@ def output_profile(profile, args):
     # Fill buffer with entries; as the `csv` library might have returned empty fields
     # as `None`, we need to check for those
     for entry in profile:
-        if entry['FREQUENCY'] == "0" and not args.keepzero:
+        if entry["FREQUENCY"] == "0" and not args.keepzero:
             continue
 
         # For special symbols "^" and "$", the EXAMPLES column will be
         # empty (if it exists)
         if "EXAMPLES" in entry:
             if entry[args.grapheme] in ["^", "$"]:
-                entry['EXAMPLES'] = ""
+                entry["EXAMPLES"] = ""
 
         tmp = [entry.get(field, "") for field in output_fields]
         tmp = [value if value else "" for value in tmp]
@@ -373,6 +436,23 @@ def main(args):
 
         logging.info("Sorting profile...")
         profile = sort_profile(profile, args)
+    elif args.command == "trim":
+        logging.info("Trimming profile...")
+
+        # Run the trimmer as many times as necessary until nothing more is left
+        # to remove
+        total_removed = 0
+        while True:
+            profile, removed = trim_profile(profile, clts, args)
+            total_removed += removed
+            if removed == 0:
+                break
+
+        logging.info("%i superfluous rules were removed.", total_removed)
+
+        # Apply profile, collecting frequencies, if a wordlist was specified
+        if args.wl:
+            profile = apply_profile(profile, args)
 
     check_consistency(profile, clts, args)
 
@@ -393,7 +473,7 @@ if __name__ == "__main__":
         "command",
         type=str,
         help="The action to be performed on an orthographic profile.",
-        choices=["format"],
+        choices=["format", "trim"],
     )
     parser.add_argument(
         "profile",
