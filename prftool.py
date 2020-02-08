@@ -37,6 +37,39 @@ def unicode2codepointstr(text):
     return " ".join(["U+{0:0{1}X}".format(ord(char), 4) for char in text])
 
 
+def ipa2types(ipa_text, clts):
+    # Obtain only the BIPA grapheme, removing left slash if any
+    ipas = [
+        token if "/" not in token else token.split("/")[1]
+        for token in ipa_text.split()
+    ]
+
+    # Get a textual representation
+    types = [
+        type(clts.bipa[token]).__name__ if token != "NULL" else "NULL"
+        for token in ipas
+    ]
+
+    return " ".join(types)
+
+
+def ipa2sca(ipa_text, clts):
+    # Obtain only the BIPA grapheme, removing left slash if any
+    ipas = [
+        token if "/" not in token else token.split("/")[1]
+        for token in ipa_text.split()
+    ]
+
+    # Get a textual representation
+    sca = clts.soundclass("sca")
+    types = [
+        clts.bipa.translate(token, sca) if token != "NULL" else "NULL"
+        for token in ipas
+    ]
+
+    return " ".join(types)
+
+
 def read_profile(filename, args):
     """
     Read a profile as a dictionary data structure.
@@ -129,18 +162,31 @@ def trim_profile(profile, clts, args):
     # Collect all keys, so that we will gradually remove them; those with
     # ^ and $ go first
     graphemes = list(segment_map.keys())
-    bound_graphemes = [grapheme for grapheme in graphemes
-            if grapheme[0] =="^" and grapheme[-1] =="$"]
-    bound_graphemes += [grapheme for grapheme in graphemes
-            if grapheme[0] =="^" and grapheme[-1]=="$"]
-    bound_graphemes += [grapheme for grapheme in graphemes
-            if grapheme[0] !="^" and grapheme[-1]=="$"]
+    bound_graphemes = [
+        grapheme
+        for grapheme in graphemes
+        if grapheme[0] == "^" and grapheme[-1] == "$"
+    ]
+    bound_graphemes += [
+        grapheme
+        for grapheme in graphemes
+        if grapheme[0] == "^" and grapheme[-1] == "$"
+    ]
+    bound_graphemes += [
+        grapheme
+        for grapheme in graphemes
+        if grapheme[0] != "^" and grapheme[-1] == "$"
+    ]
 
-    check_graphemes = bound_graphemes + sorted([
-        grapheme for grapheme in 
-        bound_graphemes
-        if len(grapheme) > 1 and grapheme not in bound_graphemes],
-        key=len, reverse=True)
+    check_graphemes = bound_graphemes + sorted(
+        [
+            grapheme
+            for grapheme in bound_graphemes
+            if len(grapheme) > 1 and grapheme not in bound_graphemes
+        ],
+        key=len,
+        reverse=True,
+    )
 
     # For each entry, we will remove it from `segment_map`, apply the resulting
     # profile, and add the entry back at the end of loop (still expansive, but
@@ -148,7 +194,7 @@ def trim_profile(profile, clts, args):
     removed = 0
     for grapheme in check_graphemes:
         # Remove the current entry from the segment map, skipping if already
-        #removed
+        # removed
         if grapheme not in segment_map:
             continue
         entry = segment_map.pop(grapheme)
@@ -236,7 +282,7 @@ def sort_profile(profile, args):
 
 
 # TODO: this is changing `segment_map` in place, improve
-def apply_profile_to_form(form, segment_map, args):
+def apply_profile_to_form(form, language, segment_map, args):
     # Read and prepare form
     if not args.nonfc:
         form = normalize(form)
@@ -261,6 +307,7 @@ def apply_profile_to_form(form, segment_map, args):
                 # Update frequency and examples
                 segment_map[needle]["FREQUENCY"] += 1
                 segment_map[needle]["EXAMPLES"].append(form)
+                segment_map[needle]["LANGUAGES"].append(language)
                 i += length
                 match = True
                 break
@@ -308,6 +355,9 @@ def apply_profile(profile, args):
         new_entry = entry.copy()
         new_entry["FREQUENCY"] = 0
         new_entry["EXAMPLES"] = []
+        new_entry["LANGUAGES"] = []
+        new_entry["TYPES"] = None
+        new_entry["SCA"] = None
         new_profile.append(new_entry)
 
     # Use the specified delimiter
@@ -339,8 +389,11 @@ def apply_profile(profile, args):
                 if row[args.lang_id] != lang_id:
                     continue
 
-            # Run the segmentation
-            segments = apply_profile_to_form(row[args.form], segment_map, args)
+            # Run the segmentation, carrying information on language ID
+            # as well
+            segments = apply_profile_to_form(
+                row[args.form], row[args.lang_id], segment_map, args
+            )
 
             # Collect output, if requested
             if args.debug_wl:
@@ -354,8 +407,10 @@ def apply_profile(profile, args):
         with open(args.debug_wl, "w") as handler:
             handler.write(dwl_buffer)
 
-    # Make sure all frequency values are strings and get some random
-    # examples
+    # Compile/fix remaining fields, such as frequency values (making sure
+    # they are all strings and getting some random but reproducible subset),
+    # building a list of languages, building sound class representations,
+    # etc.
     for entry in new_profile:
         entry["FREQUENCY"] = str(entry["FREQUENCY"])
 
@@ -374,10 +429,13 @@ def apply_profile(profile, args):
 
         entry["EXAMPLES"] = '"%s"' % example_sample
 
+        # Get a sorted set of the languages
+        entry["LANGUAGES"] = ",".join(sorted(set(entry["LANGUAGES"])))
+
     return new_profile
 
 
-def output_profile(profile, args):
+def output_profile(profile, clts, args):
     """
     Writes a profile to disk or to screen, using a default column order.
     """
@@ -395,7 +453,14 @@ def output_profile(profile, args):
     # field is found somewhere) and remove it from the `fields` we just collected
     output_fields = [
         field
-        for field in [args.grapheme, args.ipa, "FREQUENCY", "CODEPOINTS"]
+        for field in [
+            args.grapheme,
+            args.ipa,
+            "SCA",
+            "TYPES",
+            "FREQUENCY",
+            "CODEPOINTS",
+        ]
         if field in prf_fields
     ]
     output_fields += sorted(
@@ -417,9 +482,14 @@ def output_profile(profile, args):
             if entry[args.grapheme] in ["^", "$"]:
                 entry["EXAMPLES"] = ""
 
+        # Map a grapheme column to a CLTS type column, overriding any
+        # previous information
+        entry["TYPES"] = ipa2types(entry[args.ipa], clts)
+        entry["SCA"] = ipa2sca(entry[args.ipa], clts)
+
+        # build line representation and extend buffer
         tmp = [entry.get(field, "") for field in output_fields]
         tmp = [value if value else "" for value in tmp]
-
         buffer += "%s\n" % "\t".join(tmp)
 
     # Output
@@ -473,7 +543,7 @@ def main(args):
     check_consistency(profile, clts, args)
 
     # Export
-    output_profile(profile, args)
+    output_profile(profile, clts, args)
 
 
 if __name__ == "__main__":
