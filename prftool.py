@@ -126,15 +126,31 @@ def trim_profile(profile, clts, args):
     # build segment map
     segment_map = {entry[args.grapheme]: entry for entry in new_profile}
 
-    # Collect all keys, so that we will gradually remove them
-    graphemes = sorted(list(segment_map.keys()))
+    # Collect all keys, so that we will gradually remove them; those with
+    # ^ and $ go first
+    graphemes = list(segment_map.keys())
+    bound_graphemes = [grapheme for grapheme in graphemes
+            if grapheme[0] =="^" and grapheme[-1] =="$"]
+    bound_graphemes += [grapheme for grapheme in graphemes
+            if grapheme[0] =="^" and grapheme[-1]=="$"]
+    bound_graphemes += [grapheme for grapheme in graphemes
+            if grapheme[0] !="^" and grapheme[-1]=="$"]
+
+    check_graphemes = bound_graphemes + sorted([
+        grapheme for grapheme in 
+        bound_graphemes
+        if len(grapheme) > 1 and grapheme not in bound_graphemes],
+        key=len, reverse=True)
 
     # For each entry, we will remove it from `segment_map`, apply the resulting
     # profile, and add the entry back at the end of loop (still expansive, but
     # orders of magnitude less expansive than making a copy at each iteration)
     removed = 0
-    for grapheme in graphemes:
-        # Remove the current entry from the segment map
+    for grapheme in check_graphemes:
+        # Remove the current entry from the segment map, skipping if already
+        #removed
+        if grapheme not in segment_map:
+            continue
         entry = segment_map.pop(grapheme)
         ipa = entry[args.ipa]
 
